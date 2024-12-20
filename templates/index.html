@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chelsea the Babysitting Goat</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        :root {
+            --bg-dark: #000000;
+            --bg-secondary: #000000;
+            --text-primary: #E4E6EB;
+            --text-secondary: #8E8E8E;
+            --border: #3E4042;
+            --accent: #0095F6;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .app-container {
+            display: flex;
+            width: 100%;
+            height: 100%;
+        }
+
+        .sidebar {
+            width: 60px;
+            background-color: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 15px 0;
+        }
+
+        .sidebar-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            transition: background-color 0.2s ease;
+        }
+        
+        .sidebar-icon:hover {
+            background-color: rgba(255,255,255,0.1);
+        }
+        
+        .sidebar-icon img {
+            width: 24px;
+            height: 24px;
+            object-fit: contain;
+        }
+
+        .spacer {
+            height: 80px;
+        }
+
+        .sidebar-icon.profile-pic img {
+            width: 30px;
+            height: 30px;
+            object-fit: cover;
+            border-radius: 50%;
+        }
+
+        .chat-list {
+            width: 350px;
+            background-color: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+        }
+
+        .chat-list-header {
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .write-icon {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        
+        .write-icon img {
+            width: 24px;
+            height: 24px;
+            object-fit: contain;
+        }
+        
+        .write-icon:hover {
+            opacity: 0.7;
+        }
+
+        .chat-preview {
+            padding: 15px;
+            display: flex;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+        }
+
+        .chat-preview:hover {
+            background-color: rgba(255,255,255,0.05);
+        }
+
+        .chat-preview-avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            margin-right: 10px;
+            overflow: hidden;
+        }
+        
+        .chat-preview-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .chat-preview div:last-child div:last-child {
+            color: var(--text-secondary);
+            font-size: 0.8em;
+        }
+
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background-color: var(--bg-dark);
+        }
+
+        .chat-header {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            background-color: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .chat-header-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            overflow: hidden;
+            margin-right: 10px;
+        }
+        
+        .chat-header-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .message {
+            max-width: 70%;
+            margin-bottom: 10px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .message.user {
+            margin-left: auto;
+            align-items: flex-end;
+        }
+
+        .message-content {
+            padding: 10px 15px;
+            border-radius: 20px;
+            background-color: var(--accent);
+            color: white;
+        }
+
+        .message.ai .message-content {
+            background-color: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
+        .input-area {
+            display: flex;
+            padding: 15px;
+            background-color: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+        }
+
+        #message-input {
+            flex: 1;
+            padding: 10px;
+            background-color: var(--bg-dark);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            border-radius: 20px;
+            margin-right: 10px;
+        }
+
+        #send-button, #voice-button {
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 20px;
+            cursor: pointer;
+            margin-left: 5px;
+            transition: opacity 0.2s ease;
+        }
+
+        #voice-button {
+            width: 44px;
+            padding: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #voice-button.recording {
+            background-color: #ED4956;
+        }
+
+        #send-button:hover, #voice-button:hover {
+            opacity: 0.8;
+        }
+
+        audio {
+            max-width: 250px;
+            height: 40px;
+            border-radius: 20px;
+            background-color: #1c1c1c; /* Slightly lighter than black */
+        }
+        
+        /* Style the audio player controls */
+        audio::-webkit-media-controls-panel {
+            background-color: #1c1c1c;
+            border-radius: 20px;
+        }
+        
+        audio::-webkit-media-controls-play-button,
+        audio::-webkit-media-controls-mute-button {
+            background-color: var(--accent);
+            border-radius: 50%;
+            color: white;
+        }
+        
+        audio::-webkit-media-controls-current-time-display,
+        audio::-webkit-media-controls-time-remaining-display {
+            color: white;
+        }
+        
+        audio::-webkit-media-controls-timeline {
+            background-color: #333333;
+            border-radius: 10px;
+            margin: 0 10px;
+        }
+        
+        audio::-webkit-media-controls-progress-bar {
+            background-color: #333333;
+            border-radius: 10px;
+        }
+        
+        audio::-webkit-media-controls-timeline-container {
+            padding: 0 10px;
+        }
+        
+        audio::-webkit-media-controls-volume-slider {
+            background-color: #333333;
+            border-radius: 10px;
+            padding: 0 5px;
+        }
+
+        .instagram-preview {
+            margin-top: 8px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            width: 300px;
+        }
+
+        .instagram-preview-link {
+            text-decoration: none;
+            color: inherit;
+            display: block;
+            padding: 12px;
+        }
+
+        .instagram-preview-content {
+            display: flex;
+            gap: 12px;
+        }
+
+        .instagram-preview-thumbnail {
+            width: 80px;
+            height: 80px;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .instagram-preview-thumbnail img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .instagram-preview-info {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .instagram-preview-title {
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: var(--text-primary);
+        }
+
+        .instagram-preview-meta {
+            color: var(--text-secondary);
+            font-size: 0.9em;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="sidebar">
+            <div class="sidebar-icon">
+                <img src="{{ url_for('static', filename='sidebar buttons/Instagram.png') }}" alt="Instagram">
+            </div>
+            <div class="spacer"></div>
+            <div class="sidebar-icon profile-pic">
+                <img src="{{ url_for('static', filename='sidebar buttons/Home.png') }}" alt="Home">
+            </div>
+            <div class="sidebar-icon profile-pic">
+                <img src="{{ url_for('static', filename='sidebar buttons/Search.png') }}" alt="Search">
+            </div>
+            <div class="sidebar-icon profile-pic">
+                <img src="{{ url_for('static', filename='sidebar buttons/Nav.png') }}" alt="Navigation">
+            </div>
+            <div class="sidebar-icon profile-pic">
+                <img src="{{ url_for('static', filename='sidebar buttons/Reel.png') }}" alt="Reels">
+            </div>
+            <div class="sidebar-icon profile-pic">
+                <img src="{{ url_for('static', filename='sidebar buttons/Messages.png') }}" alt="Messages">
+            </div>
+            <div class="sidebar-icon profile-pic">
+                <img src="{{ url_for('static', filename='sidebar buttons/Like.png') }}" alt="Like">
+            </div>
+            <div class="sidebar-icon profile-pic">
+                <img src="{{ url_for('static', filename='sidebar buttons/Create.png') }}" alt="Create">
+            </div>
+            <div class="spacer"></div>
+            <div class="sidebar-icon profile-pic">
+                <img src="{{ url_for('static', filename='sidebar buttons/Photo.jpg') }}" alt="Profile">
+            </div>
+        </div>
+
+        <div class="chat-list">
+            <div class="chat-list-header">
+                Messages
+                <div class="write-icon">
+                    <img src="{{ url_for('static', filename='Write new/Write.png') }}" alt="Write">
+                </div>
+            </div>
+            <div class="chat-preview">
+                <div class="chat-preview-avatar">
+                    <img src="{{ url_for('static', filename='contact pictures/Carlo.jpg') }}" alt="Carlo">
+                </div>
+                <div>
+                    <div>Carlo</div>
+                    <div>Hey, did you see the game last night?</div>
+                </div>
+            </div>
+            <div class="chat-preview">
+                <div class="chat-preview-avatar">
+                    <img src="{{ url_for('static', filename='contact pictures/Jackie.jpg') }}" alt="Jackie">
+                </div>
+                <div>
+                    <div>Jackie</div>
+                    <div>Did you check out Chelsea's last video!?</div>
+                </div>
+            </div>
+            <div class="chat-preview">
+                <div class="chat-preview-avatar">
+                    <img src="{{ url_for('static', filename='contact pictures/Marie.jpg') }}" alt="Marie">
+                </div>
+                <div>
+                    <div>Marie</div>
+                    <div>Wanna grab coffee this afternoon?</div>
+                </div>
+            </div>
+            <div class="chat-preview">
+                <div class="chat-preview-avatar">
+                    <img src="{{ url_for('static', filename='contact pictures/Tom.jpg') }}" alt="Tom">
+                </div>
+                <div>
+                    <div>Tom</div>
+                    <div>Meeting got rescheduled to next week.</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-area">
+            <div class="chat-header">
+                <div class="chat-header-avatar">
+                    <img src="{{ url_for('static', filename='chelsea picture/Chelsea.png') }}" alt="Chelsea">
+                </div>
+                Chelsea Explains Everything
+            </div>
+            
+            <div id="chat-container" class="chat-container"></div>
+            
+            <div class="input-area">
+                <input type="text" id="message-input" placeholder="Ask Chelsea anything...">
+                <button id="voice-button">🎤</button>
+                <button id="send-button">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io('http://127.0.0.1:4000');
+        const chatContainer = document.getElementById('chat-container');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+        const voiceButton = document.getElementById('voice-button');
+
+        let isRecording = false;
+        let mediaRecorder;
+        let audioChunks = [];
+
+        function logMessageDetails(prefix, data) {
+            console.group(prefix);
+            console.log('Raw data:', data);
+            console.log('Type:', typeof data);
+            if (typeof data === 'object') {
+                console.log('Properties:', Object.keys(data));
+                console.log('Content:', data.response);
+                if (data.sources) console.log('Sources:', data.sources);
+            }
+            console.groupEnd();
+        }
+
+        function addMessage(message, isUser, options = {}) {
+            logMessageDetails('Adding message with options:', options);
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user' : 'ai'}`;
+            
+            const content = document.createElement('div');
+            content.className = 'message-content';
+
+            if (options.isVoice) {
+                const audio = document.createElement('audio');
+                audio.controls = true;
+                audio.src = message;
+                content.appendChild(audio);
+            } else {
+                content.textContent = message;
+            }
+
+            messageDiv.appendChild(content);
+
+            // Add Instagram preview if URL exists
+            if (!isUser && options.url && options.url.includes('instagram.com')) {
+                const previewDiv = document.createElement('div');
+                previewDiv.className = 'instagram-preview';
+                
+                const content = document.createElement('div');
+                content.className = 'instagram-preview-content';
+
+                const link = document.createElement('a');
+                link.href = options.url;
+                link.className = 'instagram-preview-link';
+                link.target = '_blank';
+                link.rel = 'noopener noreferrer';
+                
+                const thumbnail = document.createElement('div');
+                thumbnail.className = 'instagram-preview-thumbnail';
+                thumbnail.innerHTML = `<img src="{{ url_for('static', filename='chelsea picture/Chelsea.png') }}" alt="Chelsea">`;
+                
+                const info = document.createElement('div');
+                info.className = 'instagram-preview-info';
+                info.innerHTML = `
+                    <div class="instagram-preview-title">Here's the video</div>
+                    <div class="instagram-preview-meta">View on Instagram</div>
+                `;
+                
+                content.appendChild(thumbnail);
+                content.appendChild(info);
+                link.appendChild(content);
+                previewDiv.appendChild(link);
+                messageDiv.appendChild(previewDiv);
+            }
+
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (message) {
+                console.log('Sending message:', message);
+                addMessage(message, true);
+                socket.emit('message', { type: 'text', message: message });
+                messageInput.value = '';
+            }
+        }
+
+        sendButton.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        voiceButton.addEventListener('click', async () => {
+            if (!isRecording) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+
+                    mediaRecorder.ondataavailable = (event) => {
+                        audioChunks.push(event.data);
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        const audioBlob = new Blob(audioChunks);
+                        const reader = new FileReader();
+                        reader.readAsDataURL(audioBlob);
+                        reader.onloadend = () => {
+                            socket.emit('message', { type: 'voice', message: reader.result });
+                        };
+                    };
+
+                    mediaRecorder.start();
+                    isRecording = true;
+                    voiceButton.textContent = '⏹️';
+                    voiceButton.classList.add('recording');
+                    voiceButton.style.animation = 'pulse 1.5s infinite';
+                } catch (error) {
+                    console.error('Error accessing microphone:', error);
+                    alert('Could not access microphone');
+                }
+            } else {
+                mediaRecorder.stop();
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                isRecording = false;
+                voiceButton.textContent = '🎤';
+                voiceButton.classList.remove('recording');
+                voiceButton.style.animation = '';
+            }
+        });
+
+        socket.on('response', (data) => {
+            logMessageDetails('Received server response:', data);
+        
+            if (typeof data === 'object' && data.response) {
+                // Extract URL regardless of response type
+                const url = data.sources && data.sources[0];
+                
+                if (data.response.startsWith('data:audio/mpeg;base64,')) {
+                    // Handle voice response, but include URL
+                    addMessage(data.response, false, { 
+                        isVoice: true,
+                        url: url
+                    });
+                } else {
+                    // Handle text response with URL
+                    addMessage(data.response, false, {
+                        url: url
+                    });
+                }
+            } else {
+                addMessage(data, false);
+            }
+        });
+
+        // Socket connection debugging
+        socket.on('connect', () => {
+            console.log('Socket connected:', socket.id);
+        });
+
+        socket.on('connect_error', (error) => {
+            console.error('Socket connection error:', error);
+        });
+
+        socket.on('error', (error) => {
+            console.error('Socket error:', error);
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,1007 @@
+=== Source and Template Files ===
+
+=== requirements.txt ===
+
+flask==2.3.2
+flask-socketio==5.3.4
+azure-cognitiveservices-speech==1.28.0
+requests==2.31.0
+python-dotenv==1.0.0
+pydantic==2.0.3
+pydantic-settings==2.0.2
+ipykernel
+openai>=1.0.0
+supabase
+langchain
+langchain-community
+langchain-openai
+elevenlabs
+=== video_processing.py ===
+
+from moviepy.video.io.VideoFileClip import VideoFileClip
+from dotenv import load_dotenv
+import os
+from pathlib import Path
+from openai import AzureOpenAI
+from supabase import create_client
+from datetime import datetime
+from tqdm import tqdm
+import json
+
+# Load environment variables
+load_dotenv()
+
+# Initialize Azure OpenAI clients
+gpt4_client = AzureOpenAI(
+    api_key=os.getenv('GPT4_API_KEY'),
+    api_version=os.getenv('AZURE_API_VERSION'),
+    azure_endpoint=os.getenv('GPT4_ENDPOINT')
+)
+
+whisper_client = AzureOpenAI(
+    api_key=os.getenv('WHISPER_API_KEY'),
+    api_version=os.getenv('AZURE_API_VERSION'),
+    azure_endpoint=os.getenv('WHISPER_ENDPOINT')
+)
+
+ada_client = AzureOpenAI(
+    api_key=os.getenv('ADA_API_KEY'),
+    api_version=os.getenv('AZURE_API_VERSION'),
+    azure_endpoint=os.getenv('ADA_ENDPOINT')
+)
+
+# Initialize Supabase
+supabase = create_client(
+    os.getenv('SUPABASE_URL'),
+    os.getenv('SUPABASE_KEY')
+)
+
+def process_video(video_path: str, temp_dir: Path) -> bool:
+    """Process a single video file"""
+    try:
+        print(f"\nProcessing: {video_path}")
+        video_temp_dir = temp_dir / Path(video_path).stem
+        video_temp_dir.mkdir(exist_ok=True)
+        
+        # Extract audio
+        print("Extracting audio...")
+        video = VideoFileClip(str(video_path))
+        audio_path = video_temp_dir / f"{Path(video_path).stem}.wav"
+        video.audio.write_audiofile(str(audio_path), verbose=False, logger=None)
+        video.close()
+        
+        # Transcribe
+        print("Transcribing audio...")
+        with open(audio_path, 'rb') as audio_file:
+            transcript = whisper_client.audio.transcriptions.create(
+                model=os.getenv('WHISPER_DEPLOYMENT_NAME'),
+                file=audio_file
+            )
+        
+        # Generate title
+        print("Generating title...")
+        title_response = gpt4_client.chat.completions.create(
+            model=os.getenv('GPT4_DEPLOYMENT_NAME'),
+            messages=[
+                {"role": "system", "content": "Generate a concise title starting with 'How To' and then a specific action for a video based on its transcript."},
+                {"role": "user", "content": f"Generate a title for a video with this transcript: {transcript.text[:500]}..."}
+            ]
+        )
+        title = title_response.choices[0].message.content
+        
+        # Generate embedding
+        print("Generating embedding...")
+        embedding_response = ada_client.embeddings.create(
+            model=os.getenv('ADA_DEPLOYMENT_NAME'),
+            input=transcript.text
+        )
+        
+        # Store in database
+        data = {
+            "title": title,
+            "script": transcript.text,
+            "embedding": embedding_response.data[0].embedding,
+            "url": str(video_path),
+            "metadata": {
+                "processed_date": datetime.utcnow().isoformat(),
+                "original_filename": Path(video_path).name,
+                "file_path": str(video_path)
+            }
+        }
+        
+        print("Storing in database...")
+        result = supabase.table('video_content').insert(data).execute()
+        
+        # Cleanup
+        audio_path.unlink()
+        video_temp_dir.rmdir()
+        
+        print(f"Successfully processed: {title}")
+        return True
+        
+    except Exception as e:
+        print(f"Error processing {video_path}: {str(e)}")
+        return False
+
+def main():
+    # Create temp directory
+    temp_dir = Path("temp_audio")
+    temp_dir.mkdir(exist_ok=True)
+    
+    # Get all videos
+    video_folder = Path(os.getenv('VIDEO_FOLDER_PATH'))
+    videos = list(video_folder.glob("*.mp4"))
+    
+    print(f"Found {len(videos)} videos to process")
+    
+    # Track progress
+    successful = []
+    failed = []
+    
+    # Process each video with progress bar
+    for video in tqdm(videos, desc="Processing videos"):
+        if process_video(str(video), temp_dir):
+            successful.append(str(video))
+        else:
+            failed.append(str(video))
+            
+        # Save progress after each video
+        with open('processing_progress.json', 'w') as f:
+            json.dump({
+                'successful': successful,
+                'failed': failed,
+                'total': len(videos),
+                'completed': len(successful) + len(failed)
+            }, f, indent=2)
+    
+    # Cleanup main temp directory
+    temp_dir.rmdir()
+    
+    # Final report
+    print("\nProcessing Complete!")
+    print(f"Successfully processed: {len(successful)} videos")
+    print(f"Failed to process: {len(failed)} videos")
+    
+    if failed:
+        print("\nFailed videos:")
+        for video in failed:
+            print(f"- {video}")
+
+if __name__ == "__main__":
+    main()
+
+=== ./src/app.py ===
+
+from flask import Flask, render_template, request, jsonify, Response
+from flask_socketio import SocketIO, emit
+import os
+from src.core.chat.service import ChatService
+from src.core.voice.service import VoiceService
+from datetime import datetime
+import base64
+
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
+chat_service = ChatService()
+voice_service = VoiceService()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
+
+@socketio.on('message')
+def handle_message(data):
+    if data['type'] == 'text':
+        user_message = data['message']
+        response = chat_service.process_chat(user_message)
+        emit('message', {
+            'id': str(hash(response['response'])),
+            'sender': 'ai',
+            'content': response['response'],
+            'timestamp': datetime.now().isoformat(),
+            'type': 'text'
+        })
+    elif data['type'] == 'voice':
+        # Handle voice message
+        voice_data = data['message'].split(',')[1]  # Remove the "data:audio/mp3;base64," part
+        audio_bytes = base64.b64decode(voice_data)
+        
+        # Save the audio file temporarily
+        temp_filename = f"temp_audio_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3"
+        with open(temp_filename, 'wb') as f:
+            f.write(audio_bytes)
+        
+        # Process the voice message (e.g., convert to text)
+        text_from_voice = voice_service.speech_to_text(temp_filename)
+        
+        # Remove the temporary file
+        os.remove(temp_filename)
+        
+        # Process the text with the chat service
+        response = chat_service.process_chat(text_from_voice)
+        
+        # Convert the response to speech using ElevenLabs
+        audio_response = voice_service.text_to_speech(response['response'])
+        audio_base64 = base64.b64encode(audio_response).decode('utf-8')
+        
+        emit('message', {
+            'id': str(hash(response['response'])),
+            'sender': 'ai',
+            'content': f"data:audio/mpeg;base64,{audio_base64}",
+            'timestamp': datetime.now().isoformat(),
+            'type': 'voice'
+        })
+
+if __name__ == '__main__':
+    socketio.run(app, debug=True, host='0.0.0.0', port=4000)
+
+
+=== ./src/config/__init__.py ===
+
+
+
+=== ./src/config/settings.py ===
+
+from functools import lru_cache
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    # Azure OpenAI
+    gpt4_api_key: str
+    gpt4_endpoint: str
+    gpt4_deployment_name: str
+    
+    # Azure Whisper
+    whisper_api_key: str
+    whisper_endpoint: str
+    whisper_deployment_name: str
+    
+    # Azure Ada
+    ada_api_key: str
+    ada_endpoint: str
+    ada_deployment_name: str
+    
+    # Azure Version
+    azure_api_version: str
+    
+    # Supabase
+    supabase_url: str
+    supabase_key: str
+    
+    # Paths
+    video_folder_path: str
+    
+    # Instagram/Meta
+    meta_webhook_verify_token: str
+    ig_username: str
+    ig_password: str
+
+    # Azure Speech Service
+    speech_key: str
+    speech_region: str
+
+    # ElevenLabs
+    elevenlabs_api_key: str
+    elevenlabs_voice_id: str
+
+    class Config:
+        env_file = ".env"
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+
+
+
+=== ./src/core/__init__.py ===
+
+
+
+=== ./src/core/chat/__init__.py ===
+
+
+
+=== ./src/core/chat/service.py ===
+
+from langchain_openai import AzureChatOpenAI
+from src.core.search.service import SimilaritySearch
+import logging
+import time
+from datetime import datetime
+import os
+from config.settings import get_settings
+
+if not os.path.exists('logs'):
+    os.makedirs('logs')
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+file_handler = logging.FileHandler(f'logs/chat_performance_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+file_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+class ChatService:
+    def __init__(self):
+        self.settings = get_settings()
+        self.similarity_search = SimilaritySearch()
+        self.chat_model = AzureChatOpenAI(
+            azure_endpoint=self.settings.gpt4_endpoint,
+            api_key=self.settings.gpt4_api_key,
+            api_version=self.settings.azure_api_version,
+            deployment_name=self.settings.gpt4_deployment_name
+        )
+
+    def process_chat(self, query: str):
+        try:
+            total_start = time.time()
+            logger.info(f"Processing query: {query}")
+
+            search_start = time.time()
+            search_results = self.similarity_search.search(query)
+            search_time = time.time() - search_start
+            logger.info(f"Search took {search_time:.2f} seconds")
+            logger.info(f"Found {len(search_results)} relevant documents")
+            
+            if not search_results:
+                return {
+                    "response": "I couldn't find any relevant information to answer your query.",
+                    "sources": []
+                }
+            
+            context_start = time.time()
+            context_parts = []
+            for result in search_results:
+                context_parts.append(f"Source URL: {result['url']}\n{result['content']}\n---")
+            
+            context = "\n".join(context_parts)
+            context_time = time.time() - context_start
+            logger.info(f"Context preparation took {context_time:.2f} seconds")
+            logger.info(f"Context size: {len(context)} characters")
+
+            messages = [
+                {
+                    "role": "system", 
+                    "content": "You are an immigration assistant. Answer using the provided context. After answering, list 2-3 most relevant source URLs you used."
+                },
+                {
+                    "role": "user", 
+                    "content": f"Context:\n{context}\n\nQuestion: {query}"
+                }
+            ]
+
+            chat_start = time.time()
+            response = self.chat_model.invoke(messages)
+            chat_time = time.time() - chat_start
+            logger.info(f"Chat completion took {chat_time:.2f} seconds")
+
+            sources = [result['url'] for result in search_results if result.get('url')]
+            
+            total_time = time.time() - total_start
+            logger.info(f"Total process took {total_time:.2f} seconds")
+            
+            return {
+                "response": response.content,
+                "sources": sources[:3]
+            }
+
+        except Exception as e:
+            logger.error(f"Chat processing error: {str(e)}")
+            return {
+                "response": "I apologize, but I encountered an error processing your request.",
+                "sources": []
+            }
+
+=== ./src/core/search/__init__.py ===
+
+
+
+=== ./src/core/search/service.py ===
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+from langchain_openai import AzureOpenAIEmbeddings  # Change this import
+from supabase import create_client
+import logging
+import time
+from config.settings import get_settings
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class SimilaritySearch:
+    def __init__(self):
+        self.settings = get_settings()
+        self.supabase = create_client(
+            self.settings.supabase_url,
+            self.settings.supabase_key
+        )
+        # Replace OpenAI embeddings with Azure OpenAI embeddings
+        self.embeddings = AzureOpenAIEmbeddings(
+            azure_endpoint=self.settings.ada_endpoint,
+            api_key=self.settings.ada_api_key,
+            api_version=self.settings.azure_api_version,
+            deployment_name=self.settings.ada_deployment_name
+        )
+
+
+    def search(self, query: str, top_k: int = 3):
+        try:
+            logger.info(f"Starting search for query: '{query}'")
+            start_time = time.time()
+            
+            # Generate embedding
+            embedding_start = time.time()
+            query_embedding = self.embeddings.embed_query(query)
+            embedding_time = time.time() - embedding_start
+            logger.info(f"Embedding generation took: {embedding_time:.2f} seconds")
+            logger.info(f"Embedding length: {len(query_embedding)}")
+            
+            # Perform search with same threshold but more logging
+            search_start = time.time()
+            response = self.supabase.rpc(
+                'match_documents',
+                {
+                    'query_embedding': query_embedding,
+                    'match_threshold': 0.5,  # Keeping the same threshold
+                    'match_count': top_k
+                }
+            ).execute()
+            search_time = time.time() - search_start
+            logger.info(f"Database search took: {search_time:.2f} seconds")
+
+            # Log raw response for debugging
+            logger.info(f"Raw response: {response.data}")
+
+            if not response.data:
+                logger.warning("No results found in initial search")
+                # Let's try a diagnostic query to see if any documents match at all
+                diagnostic_response = self.supabase.rpc(
+                    'match_documents',
+                    {
+                        'query_embedding': query_embedding,
+                        'match_threshold': 0.1,  # Very low threshold just for diagnosis
+                        'match_count': 1
+                    }
+                ).execute()
+                if diagnostic_response.data:
+                    logger.info(f"Diagnostic search found a match with similarity: {diagnostic_response.data[0].get('similarity', 0.0)}")
+                else:
+                    logger.warning("Diagnostic search found no matches even with low threshold")
+                return []
+
+            # Process and filter results with logging
+            results = [
+                {
+                    'content': item.get('content', ''),
+                    'url': item.get('url', ''),
+                    'similarity': item.get('similarity', 0.0)
+                }
+                for item in response.data
+                if item.get('similarity', 0.0) > 0.5
+            ]
+
+            # Log more details about matches
+            if results:
+                logger.info(f"Best match similarity: {results[0]['similarity']}")
+                logger.info(f"Best match URL: {results[0]['url']}")
+
+            total_time = time.time() - start_time
+            logger.info(f"Total search time: {total_time:.2f} seconds")
+            logger.info(f"Number of results returned: {len(results)}")
+            
+            return results[:top_k]
+
+        except Exception as e:
+            logger.error(f"Search error: {str(e)}", exc_info=True)
+            return []
+
+=== ./src/core/voice/__init__.py ===
+
+
+
+=== ./src/core/voice/service.py ===
+
+import os
+import requests
+import logging
+from azure.cognitiveservices.speech import AudioConfig, SpeechConfig, SpeechRecognizer
+from azure.cognitiveservices.speech.audio import AudioOutputConfig
+from config.settings import get_settings
+
+class VoiceService:
+    def __init__(self):
+        self.settings = get_settings()
+        self.speech_config = SpeechConfig(
+            subscription=self.settings.speech_key,
+            region=self.settings.speech_region
+        )
+        self.elevenlabs_api_key = self.settings.elevenlabs_api_key
+        self.elevenlabs_voice_id = self.settings.elevenlabs_voice_id
+
+    def text_to_speech(self, text: str) -> bytes:
+        """Convert text to speech using ElevenLabs API"""
+        try:
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.elevenlabs_voice_id}"
+            headers = {
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": self.elevenlabs_api_key
+            }
+            data = {
+                "text": text,
+                "model_id": "eleven_monolingual_v1",
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.5
+                }
+            }
+            response = requests.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            logging.error(f"Error generating speech with ElevenLabs: {e}")
+            raise
+
+    def speech_to_text(self, audio_file: str) -> str:
+        """Convert speech to text using Azure Speech-to-Text"""
+        try:
+            audio_config = AudioConfig(filename=audio_file)
+            recognizer = SpeechRecognizer(speech_config=self.speech_config, audio_config=audio_config)
+            
+            result = recognizer.recognize_once_async().get()
+            
+            if result.reason == ResultReason.RecognizedSpeech:
+                return result.text
+            elif result.reason == ResultReason.NoMatch:
+                logging.warning("No speech could be recognized")
+                return ""
+            elif result.reason == ResultReason.Canceled:
+                cancellation_details = result.cancellation_details
+                logging.error(f"Speech recognition canceled: {cancellation_details.reason}")
+                if cancellation_details.reason == CancellationReason.Error:
+                    logging.error(f"Error details: {cancellation_details.error_details}")
+                return ""
+        except Exception as e:
+            logging.error(f"Error in speech recognition: {e}")
+            return ""
+
+
+=== ./src/core/web/__init__.py ===
+
+
+
+=== ./src/core/web/client.py ===
+
+from dataclasses import dataclass
+import logging
+
+@dataclass
+class WebMessage:
+    sender_id: str
+    message_type: str
+    content: str
+    thread_id: str
+
+class WebClient:
+    def __init__(self):
+        self.active_connections = set()
+        
+    def add_connection(self, connection):
+        self.active_connections.add(connection)
+        
+    def remove_connection(self, connection):
+        self.active_connections.remove(connection)
+        
+    def send_message(self, message: WebMessage):
+        for connection in self.active_connections:
+            try:
+                connection.send(message)
+            except Exception as e:
+                logging.error(f"Failed to send message: {e}")
+                self.remove_connection(connection)
+
+=== ./src/main.py ===
+
+from core.chat.service import ChatService
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def main():
+    chat_service = ChatService()
+    print("Immigration Assistant (type 'exit' to quit)")
+    print("-" * 50)
+    
+    while True:
+        try:
+            query = input("\nYou: ").strip()
+            if query.lower() == 'exit':
+                break
+            if not query:
+                continue
+                
+            result = chat_service.process_chat(query)
+            
+            if result['response']:
+                print(f"\nAssistant: {result['response']}")
+                
+                sources = result.get('sources', [])
+                if sources:
+                    print("\nSources:")
+                    for i, url in enumerate(sources, 1):
+                        print(f"{i}. {url}")
+            else:
+                print("\nAssistant: Sorry I can't assist you with this. I'm Eldo, an AI immigration assistant here to help people navigate their immigration process. I am only qualified to talk about this topic and there's only so much I know.")
+                
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            logger.error(f"Error: {str(e)}")
+            print("An error occurred. Please try again.")
+
+if __name__ == "__main__":
+    main()
+
+=== app.py ===
+
+from flask import Flask, render_template, request, jsonify, Response
+from flask_socketio import SocketIO, emit
+import os
+from src.core.chat.service import ChatService
+from src.core.voice.service import VoiceService
+from datetime import datetime
+import base64
+
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
+chat_service = ChatService()
+voice_service = VoiceService()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
+
+@socketio.on('message')
+def handle_message(data):
+    if data['type'] == 'text':
+        user_message = data['message']
+        response = chat_service.process_chat(user_message)
+        emit('message', {
+            'id': str(hash(response['response'])),
+            'sender': 'ai',
+            'content': response['response'],
+            'timestamp': datetime.now().isoformat(),
+            'type': 'text'
+        })
+    elif data['type'] == 'voice':
+        # Handle voice message
+        voice_data = data['message'].split(',')[1]  # Remove the "data:audio/mp3;base64," part
+        audio_bytes = base64.b64decode(voice_data)
+        
+        # Save the audio file temporarily
+        temp_filename = f"temp_audio_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3"
+        with open(temp_filename, 'wb') as f:
+            f.write(audio_bytes)
+        
+        # Process the voice message (e.g., convert to text)
+        text_from_voice = voice_service.speech_to_text(temp_filename)
+        
+        # Remove the temporary file
+        os.remove(temp_filename)
+        
+        # Process the text with the chat service
+        response = chat_service.process_chat(text_from_voice)
+        
+        # Convert the response to speech using ElevenLabs
+        audio_response = voice_service.text_to_speech(response['response'])
+        audio_base64 = base64.b64encode(audio_response).decode('utf-8')
+        
+        emit('message', {
+            'id': str(hash(response['response'])),
+            'sender': 'ai',
+            'content': f"data:audio/mpeg;base64,{audio_base64}",
+            'timestamp': datetime.now().isoformat(),
+            'type': 'voice'
+        })
+
+if __name__ == '__main__':
+    socketio.run(app, debug=True, host='0.0.0.0', port=4000)
+
+
+=== __init__.py ===
+
+
+
+=== settings.py ===
+
+from functools import lru_cache
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    # Azure OpenAI
+    gpt4_api_key: str
+    gpt4_endpoint: str
+    gpt4_deployment_name: str
+    
+    # Azure Whisper
+    whisper_api_key: str
+    whisper_endpoint: str
+    whisper_deployment_name: str
+    
+    # Azure Ada
+    ada_api_key: str
+    ada_endpoint: str
+    ada_deployment_name: str
+    
+    # Azure Version
+    azure_api_version: str
+    
+    # Supabase
+    supabase_url: str
+    supabase_key: str
+    
+    # Paths
+    video_folder_path: str
+    
+    # Instagram/Meta
+    meta_webhook_verify_token: str
+    ig_username: str
+    ig_password: str
+
+    # Azure Speech Service
+    speech_key: str
+    speech_region: str
+
+    # ElevenLabs
+    elevenlabs_api_key: str
+    elevenlabs_voice_id: str
+
+    class Config:
+        env_file = ".env"
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instagram DM Clone</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            height: 100%;
+            background-color: #FAFAFA;
+        }
+        .container {
+            max-width: 935px;
+            margin: 0 auto;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            background-color: #FFFFFF;
+            border-bottom: 1px solid #DBDBDB;
+            padding: 10px 20px;
+            display: flex;
+            align-items: center;
+        }
+        .header h1 {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 0;
+        }
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background-color: #FFFFFF;
+            border: 1px solid #DBDBDB;
+            border-top: none;
+            border-bottom: none;
+        }
+        .message {
+            max-width: 70%;
+            margin-bottom: 10px;
+            clear: both;
+        }
+        .message.user {
+            float: right;
+        }
+        .message.ai {
+            float: left;
+        }
+        .message-content {
+            padding: 10px 15px;
+            border-radius: 22px;
+            display: inline-block;
+        }
+        .user .message-content {
+            background-color: #3897F0;
+            color: #FFFFFF;
+        }
+        .ai .message-content {
+            background-color: #EFEFEF;
+            color: #000000;
+        }
+        .input-area {
+            background-color: #FFFFFF;
+            border-top: 1px solid #DBDBDB;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+        }
+        #message-input {
+            flex: 1;
+            border: 1px solid #DBDBDB;
+            border-radius: 22px;
+            padding: 10px 15px;
+            font-size: 14px;
+            outline: none;
+        }
+        #send-button, #voice-button {
+            background-color: transparent;
+            border: none;
+            color: #3897F0;
+            font-weight: 600;
+            font-size: 14px;
+            padding: 0 10px;
+            cursor: pointer;
+        }
+        #voice-button {
+            font-size: 24px;
+        }
+        .voice-message {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .voice-message audio {
+            max-width: 200px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Chat</h1>
+        </div>
+        <div id="chat-container" class="chat-container"></div>
+        <div class="input-area">
+            <input type="text" id="message-input" placeholder="Message...">
+            <button id="voice-button">🎤</button>
+            <button id="send-button">Send</button>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        const chatContainer = document.getElementById('chat-container');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+        const voiceButton = document.getElementById('voice-button');
+
+        let isRecording = false;
+        let mediaRecorder;
+        let audioChunks = [];
+
+        function addMessage(message, isUser, isVoice = false) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('message', isUser ? 'user' : 'ai');
+            
+            if (isVoice) {
+                messageElement.innerHTML = `
+                    <div class="message-content voice-message">
+                        <audio controls src="${message}"></audio>
+                        <span>Voice message</span>
+                    </div>`;
+            } else {
+                messageElement.innerHTML = `<div class="message-content">${message}</div>`;
+            }
+            
+            chatContainer.appendChild(messageElement);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        sendButton.addEventListener('click', () => {
+            const message = messageInput.value.trim();
+            if (message) {
+                addMessage(message, true);
+                socket.emit('message', { message: message, type: 'text' });
+                messageInput.value = '';
+            }
+        });
+
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendButton.click();
+            }
+        });
+
+        voiceButton.addEventListener('click', () => {
+            if (!isRecording) {
+                startRecording();
+            } else {
+                stopRecording();
+            }
+        });
+
+        async function startRecording() {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+
+            mediaRecorder.addEventListener('dataavailable', event => {
+                audioChunks.push(event.data);
+            });
+
+            mediaRecorder.addEventListener('stop', () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/mp3' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                addMessage(audioUrl, true, true);
+                
+                // Send audio to server
+                const reader = new FileReader();
+                reader.readAsDataURL(audioBlob);
+                reader.onloadend = function() {
+                    const base64Audio = reader.result;
+                    socket.emit('message', { message: base64Audio, type: 'voice' });
+                }
+            });
+
+            mediaRecorder.start();
+            isRecording = true;
+            voiceButton.textContent = '⏹️';
+        }
+
+        function stopRecording() {
+            mediaRecorder.stop();
+            isRecording = false;
+            voiceButton.textContent = '🎤';
+        }
+
+        socket.on('message', (data) => {
+            if (data.type === 'voice') {
+                addMessage(data.content, false, true);
+            } else {
+                addMessage(data.content, false);
+            }
+        });
+    </script>
+</body>
+</html>
+
+
+
+
+

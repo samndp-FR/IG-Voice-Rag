@@ -1,0 +1,30 @@
+.
+├── app.py
+├── combined_code.txt
+├── logs
+├── main.py
+├── project_structure.txt
+├── requirements.txt
+├── src
+│   ├── config
+│   │   ├── __init__.py
+│   │   └── settings.py
+│   └── core
+│       ├── __init__.py
+│       ├── chat
+│       │   ├── __init__.py
+│       │   └── service.py
+│       ├── search
+│       │   ├── __init__.py
+│       │   └── service.py
+│       ├── voice
+│       │   ├── __init__.py
+│       │   └── service.py
+│       └── web
+│           ├── __init__.py
+│           └── client.py
+├── templates
+│   └── index.html
+└── video_processing.py
+
+10 directories, 18 files
